@@ -18,11 +18,14 @@ import argparse
 import base64
 import json
 import math
+import os
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import ballistics as bal
 
 DEFAULT_HOST = "http://127.0.0.1:8111"
 PLAYER_ICON = "Player"
@@ -386,13 +389,20 @@ def describe(m: Measurement) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Консоль
 # --------------------------------------------------------------------------- #
-def run_console(host: str, interval: float, once: bool) -> int:
+def run_console(host: str, interval: float, once: bool,
+                settings: Optional["FireControlSettings"] = None) -> int:
     import time
 
     last = None
     try:
         while True:
-            text = "\n".join(describe(measure(host)))
+            m = measure(host)
+            lines = describe(m)
+            if settings is not None:
+                fs = solve_for(m.main, settings)
+                if fs is not None:
+                    lines += ["СУО: " + line for line in bal.format_solution(fs)]
+            text = "\n".join(lines)
             if once:
                 print(text)
                 return 0
@@ -407,6 +417,66 @@ def run_console(host: str, interval: float, once: bool) -> int:
 # --------------------------------------------------------------------------- #
 # Окно с картой
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Настройки СУО (сохраняются между запусками)
+# --------------------------------------------------------------------------- #
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".wt_rangefinder.json")
+
+
+@dataclass
+class FireControlSettings:
+    own_alt: float = 0.0
+    target_alt: float = 0.0
+    shell_type: str = "ap"
+    v0: float = 800.0
+    mass_kg: float = 9.0
+    caliber_mm: float = 85.0
+    form_factor: float = bal.SHELL_TYPES["ap"].form_factor
+    max_elev: float = 20.0
+    max_depr: float = 8.0
+    high_angle: bool = False
+
+    def shell(self) -> bal.Shell:
+        return bal.Shell(self.v0, self.mass_kg, self.caliber_mm, self.form_factor)
+
+    @classmethod
+    def load(cls, path: str = SETTINGS_PATH) -> "FireControlSettings":
+        st = cls()
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return st
+        for k, v in data.items() if isinstance(data, dict) else []:
+            if hasattr(st, k):
+                try:
+                    setattr(st, k, type(getattr(st, k))(v))
+                except (TypeError, ValueError):
+                    pass
+        return st
+
+    def save(self, path: str = SETTINGS_PATH) -> None:
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.__dict__, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+
+def solve_for(target: Optional[Target], st: FireControlSettings) -> Optional[bal.FireSolution]:
+    if target is None:
+        return None
+    return bal.solve(st.shell(), target.distance_m, st.own_alt, st.target_alt,
+                     high_angle=st.high_angle, max_elev=st.max_elev, max_depr=st.max_depr)
+
+
+def parse_float(text: str) -> Optional[float]:
+    try:
+        return float(text.strip().replace(",", "."))
+    except ValueError:
+        return None
+
+
 SIDE_COLORS = {
     "player": "#FAC81E", "squad": "#67D756", "ally": "#4D7CFF",
     "enemy": "#FF3B30", "neutral": "#BBBBBB",
@@ -491,9 +561,14 @@ class RangefinderApp:
                                  "Esc — выйти из полноэкранного   Ctrl+M — скрыть карту",
                  font=("Segoe UI", 9), fg="#888888", bg=self.BG).pack(side="bottom", pady=(0, 4))
 
-        self.canvas = tk.Canvas(self.root, width=map_size, height=map_size,
+        body = tk.Frame(self.root, bg=self.BG)
+        body.pack(fill="both", expand=True)
+        self.settings = FireControlSettings.load()
+        self.fc_cache: Tuple[Any, Optional[bal.FireSolution]] = (None, None)
+        self._build_fc_panel(body)
+        self.canvas = tk.Canvas(body, width=map_size, height=map_size,
                                 bg=self.BG, highlightthickness=0, cursor="crosshair")
-        self.canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        self.canvas.pack(side="left", fill="both", expand=True, padx=6, pady=6)
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Button-3>", self.on_clear)
         self.canvas.bind("<Configure>", self.on_resize)
@@ -503,6 +578,126 @@ class RangefinderApp:
         self.root.bind("<Escape>", lambda _e: self.set_fullscreen(False))
         if fullscreen:
             self.root.after(100, lambda: self.set_fullscreen(True))
+
+    # --- панель СУО ------------------------------------------------------- #
+    def _build_fc_panel(self, parent: Any) -> None:
+        tk = self.tk
+        st = self.settings
+        bg, fg, dim = "#181818", "#DDDDDD", "#8A8A8A"
+        panel = tk.Frame(parent, bg=bg, padx=10, pady=8)
+        panel.pack(side="right", fill="y", padx=(0, 6), pady=6)
+
+        tk.Label(panel, text="СУО", font=("Segoe UI", 11, "bold"), fg=dim, bg=bg).pack(anchor="w")
+        self.fc_main = tk.StringVar(value="Прицел: —")
+        self.fc_text = tk.StringVar(value="Укажите цель на карте")
+        tk.Label(panel, textvariable=self.fc_main, font=("Consolas", 22, "bold"),
+                 fg="#FFA500", bg=bg).pack(anchor="w")
+        self.fc_label = tk.Label(panel, textvariable=self.fc_text, font=("Segoe UI", 10), fg=fg,
+                                 bg=bg, justify="left", anchor="w", wraplength=270)
+        self.fc_label.pack(anchor="w", fill="x")
+        self.fc_warn = tk.StringVar(value="")
+        tk.Label(panel, textvariable=self.fc_warn, font=("Segoe UI", 10, "bold"), fg="#FF6B5B",
+                 bg=bg, justify="left", anchor="w", wraplength=270).pack(anchor="w", fill="x",
+                                                                          pady=(0, 8))
+
+        self.fc_vars: Dict[str, Any] = {}
+        form = tk.Frame(panel, bg=bg)
+        form.pack(anchor="w", fill="x")
+        row = 0
+
+        def header(text: str) -> None:
+            nonlocal row
+            tk.Label(form, text=text, font=("Segoe UI", 9, "bold"), fg=dim, bg=bg).grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=(8, 2))
+            row += 1
+
+        def field_(key: str, label: str, value: float) -> None:
+            nonlocal row
+            var = tk.StringVar(value=f"{value:g}")
+            tk.Label(form, text=label, fg=fg, bg=bg, font=("Segoe UI", 10)).grid(
+                row=row, column=0, sticky="w")
+            tk.Entry(form, textvariable=var, width=9, bg="#2A2A2A", fg="#FFFFFF",
+                     insertbackground="#FFFFFF", relief="flat").grid(row=row, column=1, sticky="e", pady=1)
+            var.trace_add("write", lambda *_: self._on_fc_change())
+            self.fc_vars[key] = var
+            row += 1
+
+        header("Высоты (м)")
+        field_("own_alt", "Своя высота", st.own_alt)
+        field_("target_alt", "Высота цели", st.target_alt)
+
+        header("Снаряд (из карточки снаряда в игре)")
+        names = {k: t.name for k, t in bal.SHELL_TYPES.items()}
+        self.shell_name = tk.StringVar(value=names.get(st.shell_type, names["ap"]))
+        menu = tk.OptionMenu(form, self.shell_name, *names.values(), command=self._on_shell_type)
+        menu.configure(bg="#2A2A2A", fg="#FFFFFF", activebackground="#3A3A3A",
+                       highlightthickness=0, relief="flat", width=26, anchor="w")
+        menu.grid(row=row, column=0, columnspan=2, sticky="we", pady=2)
+        row += 1
+        self.shell_hint = tk.StringVar(value=bal.SHELL_TYPES.get(st.shell_type, bal.SHELL_TYPES["ap"]).hint)
+        tk.Label(form, textvariable=self.shell_hint, fg=dim, bg=bg, font=("Segoe UI", 8),
+                 wraplength=260, justify="left").grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+        field_("v0", "Нач. скорость, м/с", st.v0)
+        field_("mass_kg", "Масса, кг", st.mass_kg)
+        field_("caliber_mm", "Калибр, мм", st.caliber_mm)
+        field_("form_factor", "Коэф. формы", st.form_factor)
+
+        header("Орудие (°)")
+        field_("max_elev", "Макс. возвышение", st.max_elev)
+        field_("max_depr", "Макс. склонение", st.max_depr)
+
+        self.high_var = tk.BooleanVar(value=st.high_angle)
+        tk.Checkbutton(form, text="Навесная траектория", variable=self.high_var,
+                       command=self._on_fc_change, fg=fg, bg=bg, selectcolor="#2A2A2A",
+                       activebackground=bg, activeforeground=fg).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+    def _on_shell_type(self, name: str) -> None:
+        for key, t in bal.SHELL_TYPES.items():
+            if t.name == name:
+                self.settings.shell_type = key
+                self.shell_hint.set(t.hint)
+                if key != "custom":
+                    self.fc_vars["form_factor"].set(f"{t.form_factor:g}")
+        self._on_fc_change()
+
+    def _on_fc_change(self) -> None:
+        st = self.settings
+        for key, var in self.fc_vars.items():
+            value = parse_float(var.get())
+            if value is not None:
+                setattr(st, key, value)
+        st.high_angle = bool(self.high_var.get()) if hasattr(self, "high_var") else st.high_angle
+        st.save()
+        if self.last is not None and hasattr(self, "fc_main"):
+            self._update_fc(self.last)
+
+    def _update_fc(self, m: Measurement) -> None:
+        target = m.main
+        if target is None:
+            self.fc_main.set("Прицел: —")
+            self.fc_text.set("Укажите цель на карте")
+            self.fc_warn.set("")
+            return
+        st = self.settings
+        key = (round(target.distance_m), st.own_alt, st.target_alt, st.v0, st.mass_kg,
+               st.caliber_mm, st.form_factor, st.max_elev, st.max_depr, st.high_angle)
+        if self.fc_cache[0] != key:
+            self.fc_cache = (key, solve_for(target, st))
+        fs = self.fc_cache[1]
+        if fs is None:
+            return
+        lines = [ln for ln in bal.format_solution(fs) if not ln.startswith("⚠")]
+        if fs.low is not None and fs.low.sight_range_m is not None:
+            self.fc_main.set(f"Прицел: {fs.low.sight_range_m:.0f} м")
+            lines = lines[1:]
+        else:
+            self.fc_main.set("Прицел: —")
+        lines.insert(0, f"Азимут: {target.bearing_deg:.0f}° ({compass_point(target.bearing_deg)})")
+        lines.insert(1, f"Дальность: {fs.distance_m:.0f} м, превышение {fs.height_diff_m:+.0f} м")
+        self.fc_text.set("\n".join(lines))
+        self.fc_warn.set("\n".join("⚠ " + w for w in fs.warnings))
 
     # --- события ---------------------------------------------------------- #
     def on_click(self, event: Any) -> None:
@@ -533,7 +728,7 @@ class RangefinderApp:
         if self.map_visible:
             self.canvas.pack_forget()
         else:
-            self.canvas.pack(fill="both", expand=True, padx=6, pady=6)
+            self.canvas.pack(side="left", fill="both", expand=True, padx=6, pady=6)
         self.map_visible = not self.map_visible
 
     def set_fullscreen(self, on: bool) -> None:
@@ -657,16 +852,18 @@ class RangefinderApp:
                 break
             if nx >= 0:
                 c.create_line(ox + nx * s, oy, ox + nx * s, oy + s, fill="#3A4A3A")
-                c.create_text(ox + nx * s + 3, oy + 2, text=str(i + 1), anchor="nw",
-                              fill="#8A9A8A", font=font)
+                if nx * s < s - 14 * k:
+                    c.create_text(ox + nx * s + 3, oy + 2, text=str(i + 1), anchor="nw",
+                                  fill="#8A9A8A", font=font)
         for j in range(0, 26):
             ny = (info.max_y - (gy0 - j * info.grid_step_y)) / info.size_y
             if ny > 1:
                 break
             if ny >= 0:
                 c.create_line(ox, oy + ny * s, ox + s, oy + ny * s, fill="#3A4A3A")
-                c.create_text(ox + 2, oy + ny * s + 12 * k, text=chr(ord("A") + j), anchor="nw",
-                              fill="#8A9A8A", font=font)
+                if ny * s + 24 * k < s:
+                    c.create_text(ox + 2, oy + ny * s + 12 * k, text=chr(ord("A") + j), anchor="nw",
+                                  fill="#8A9A8A", font=font)
 
     def refresh(self, reschedule: bool = True) -> None:
         m = measure(self.host, timeout=min(1.0, self.interval_ms / 1000), click=self.click)
@@ -681,6 +878,7 @@ class RangefinderApp:
             if sq:
                 lines[0] += f", квадрат {sq}"
         self.info_var.set("\n".join(lines))
+        self._update_fc(m)
         if reschedule:
             self.root.after(self.interval_ms, self.refresh)
 
@@ -716,11 +914,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="начальный размер карты в окне, пикселей (по умолчанию 600)")
     parser.add_argument("--fullscreen", action="store_true",
                         help="сразу открыть на весь экран (F11 — переключить)")
+    fc = parser.add_argument_group("СУО (консольный режим; в окне — панель справа)")
+    fc.add_argument("--own-alt", type=float, help="своя высота, м")
+    fc.add_argument("--target-alt", type=float, help="высота цели, м")
+    fc.add_argument("--v0", type=float, help="начальная скорость снаряда, м/с")
+    fc.add_argument("--mass", type=float, help="масса снаряда, кг")
+    fc.add_argument("--caliber", type=float, help="калибр снаряда, мм")
+    fc.add_argument("--shell-type", choices=sorted(bal.SHELL_TYPES), help="тип снаряда")
+    fc.add_argument("--high-angle", action="store_true", help="считать и навесную траекторию")
     args = parser.parse_args(argv)
 
     interval = max(0.1, args.interval)
     if args.console or args.once:
-        return run_console(args.host, interval, args.once)
+        st = FireControlSettings.load()
+        for attr, val in (("own_alt", args.own_alt), ("target_alt", args.target_alt),
+                          ("v0", args.v0), ("mass_kg", args.mass), ("caliber_mm", args.caliber)):
+            if val is not None:
+                setattr(st, attr, val)
+        if args.shell_type:
+            st.shell_type = args.shell_type
+            st.form_factor = bal.SHELL_TYPES[args.shell_type].form_factor
+        if args.high_angle:
+            st.high_angle = True
+        return run_console(args.host, interval, args.once, st)
     return run_gui(args.host, interval, min(1.0, max(0.2, args.alpha)),
                    max(200, args.map_size), args.fullscreen)
 
