@@ -42,10 +42,14 @@ def map_obj() -> list:
          "icon_bg": "none", "x": px, "y": py, "dx": 0.0, "dy": -1.0},
         {"type": "ground_model", "color": "#174DFF", "blink": 0, "icon": "MediumTank",
          "icon_bg": "none", "x": 0.32, "y": 0.68},
+        {"type": "ground_model", "color": "#fa0C00", "color[]": [250, 12, 0], "blink": 0,
+         "icon": "HeavyTank", "icon_bg": "none", "x": 0.55, "y": 0.35},
         {"type": "point_of_interest", "color": "#FFFFFF", "blink": 0, "icon": "none",
          "icon_bg": "none", "x": 0.6, "y": 0.4},
-        {"type": "capture_zone", "color": "#FAC81E", "blink": 0, "icon": "capture_zone",
-         "icon_bg": "none", "x": 0.5, "y": 0.5},
+        {"type": "capture_zone", "color": "#fa0C00", "blink": 0, "icon": "capture_zone",
+         "icon_bg": "none", "x": 0.5, "y": 0.5, "zone_label": "A"},
+        {"type": "capture_zone", "color": "#174DFF", "blink": 0, "icon": "capture_zone",
+         "icon_bg": "none", "x": 0.25, "y": 0.6, "zone_label": "B"},
     ]
 
 

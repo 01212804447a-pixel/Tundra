@@ -1,0 +1,243 @@
+[
+{
+"type": "airfield",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "none",
+"icon_bg": "none",
+"sx": 0.245632,
+"sy": 4.445181,
+"ex": 0.222053,
+"ey": 4.209165
+},
+{
+"type": "ground_model",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "MediumTank",
+"icon_bg": "none",
+"x": 0.395057,
+"y": 0.573554
+},
+{
+"type": "ground_model",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "MediumTank",
+"icon_bg": "none",
+"x": 0.975461,
+"y": 0.525629
+},
+{
+"type": "ground_model",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "TankDestroyer",
+"icon_bg": "none",
+"x": 0.899825,
+"y": 0.396745
+},
+{
+"type": "ground_model",
+"color": "#faC81E",
+"color[]": [
+250,
+200,
+30
+],
+"blink": 0,
+"icon": "Player",
+"icon_bg": "none",
+"x": 0.145702,
+"y": 0.758814,
+"dx": 0.238913,
+"dy": -0.971041
+},
+{
+"type": "ground_model",
+"color": "#043FFF",
+"color[]": [
+4,
+63,
+255
+],
+"blink": 2,
+"icon": "MediumTank",
+"icon_bg": "none",
+"x": 0.199476,
+"y": 0.727203
+},
+{
+"type": "ground_model",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "LightTank",
+"icon_bg": "none",
+"x": 0.97065,
+"y": 0.715568
+},
+{
+"type": "ground_model",
+"color": "#67D756",
+"color[]": [
+103,
+215,
+86
+],
+"blink": 0,
+"icon": "IFV",
+"icon_bg": "none",
+"x": 0.142161,
+"y": 0.687198
+},
+{
+"type": "ground_model",
+"color": "#1839A7",
+"color[]": [
+24,
+57,
+167
+],
+"blink": 0,
+"icon": "TankDestroyer",
+"icon_bg": "none",
+"x": 0.134684,
+"y": 0.799614
+},
+{
+"type": "capture_zone",
+"color": "#fa0C00",
+"color[]": [
+250,
+12,
+0
+],
+"blink": 0,
+"icon": "capture_zone",
+"icon_bg": "none",
+"x": 0.357068,
+"y": 0.483776,
+"zone_id": 0,
+"zone_label": "A",
+"zone_label_code": 65
+},
+{
+"type": "capture_zone",
+"color": "#fa0C00",
+"color[]": [
+250,
+12,
+0
+],
+"blink": 0,
+"icon": "capture_zone",
+"icon_bg": "none",
+"x": 0.837334,
+"y": 0.400427,
+"zone_id": 1,
+"zone_label": "B",
+"zone_label_code": 66
+},
+{
+"type": "capture_zone",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "capture_zone",
+"icon_bg": "none",
+"x": 0.754886,
+"y": 0.799668,
+"zone_id": 2,
+"zone_label": "C",
+"zone_label_code": 67
+},
+{
+"type": "respawn_base_tank",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "respawn_base_tank",
+"icon_bg": "none",
+"x": 0.145702,
+"y": 0.758814
+},
+{
+"type": "respawn_base_tank",
+"color": "#fa0C00",
+"color[]": [
+250,
+12,
+0
+],
+"blink": 0,
+"icon": "respawn_base_tank",
+"icon_bg": "none",
+"x": 0.103226,
+"y": 0.286082
+},
+{
+"type": "respawn_base_fighter",
+"color": "#174DFF",
+"color[]": [
+23,
+77,
+255
+],
+"blink": 0,
+"icon": "respawn_base_fighter",
+"icon_bg": "none",
+"x": -12.815085,
+"y": 21.112997,
+"dx": 150.0,
+"dy": -259.80899
+},
+{
+"type": "respawn_base_ucav",
+"color": "#fa0C00",
+"color[]": [
+250,
+12,
+0
+],
+"blink": 0,
+"icon": "respawn_base_ucav",
+"icon_bg": "none",
+"x": 2.893176,
+"y": -8.630248,
+"dx": -7.000957,
+"dy": 18.734636
+}
+]
