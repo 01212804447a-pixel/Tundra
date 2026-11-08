@@ -25,7 +25,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import ballistics as bal
+try:  # СУО необязательна: без ballistics.py работает только дальномер
+    import ballistics as bal
+except ImportError:  # pragma: no cover
+    bal = None  # type: ignore
+HAS_FC = bal is not None
 
 DEFAULT_HOST = "http://127.0.0.1:8111"
 PLAYER_ICON = "Player"
@@ -431,10 +435,11 @@ class FireControlSettings:
     v0: float = 800.0
     mass_kg: float = 9.0
     caliber_mm: float = 85.0
-    form_factor: float = bal.SHELL_TYPES["ap"].form_factor
+    form_factor: float = 1.15
     max_elev: float = 20.0
     max_depr: float = 8.0
     high_angle: bool = False
+    fc_enabled: bool = True  # показывать панель СУО
 
     def shell(self) -> bal.Shell:
         return bal.Shell(self.v0, self.mass_kg, self.caliber_mm, self.form_factor)
@@ -463,8 +468,8 @@ class FireControlSettings:
             pass
 
 
-def solve_for(target: Optional[Target], st: FireControlSettings) -> Optional[bal.FireSolution]:
-    if target is None:
+def solve_for(target: Optional[Target], st: FireControlSettings) -> Optional["bal.FireSolution"]:
+    if target is None or not HAS_FC:
         return None
     return bal.solve(st.shell(), target.distance_m, st.own_alt, st.target_alt,
                      high_angle=st.high_angle, max_elev=st.max_elev, max_depr=st.max_depr)
@@ -518,7 +523,7 @@ class RangefinderApp:
     BG = "#111111"
 
     def __init__(self, host: str, interval: float, alpha: float, map_size: int,
-                 fullscreen: bool = False) -> None:
+                 fullscreen: bool = False, fire_control: bool = True) -> None:
         import tkinter as tk
 
         self.tk = tk
@@ -558,14 +563,26 @@ class RangefinderApp:
                  fg="#DDDDDD", bg=self.BG, justify="left", anchor="w",
                  padx=8, pady=2).pack(fill="x")
         tk.Label(self.root, text="ЛКМ — цель   ПКМ — сброс   F11 — весь экран   "
-                                 "Esc — выйти из полноэкранного   Ctrl+M — скрыть карту",
+                                 "Esc — выйти из полноэкранного   Ctrl+M — скрыть карту"
+                                 + ("   Ctrl+F — СУО" if HAS_FC else ""),
                  font=("Segoe UI", 9), fg="#888888", bg=self.BG).pack(side="bottom", pady=(0, 4))
 
         body = tk.Frame(self.root, bg=self.BG)
         body.pack(fill="both", expand=True)
         self.settings = FireControlSettings.load()
-        self.fc_cache: Tuple[Any, Optional[bal.FireSolution]] = (None, None)
-        self._build_fc_panel(body)
+        self.fc_cache: Tuple[Any, Any] = (None, None)
+        self.fc_panel: Any = None
+        self.fc_visible = False
+        if HAS_FC:
+            self._build_fc_panel(body)
+            if self.settings.fc_enabled and fire_control:
+                self.fc_panel.pack(side="right", fill="y", padx=(0, 6), pady=6)
+                self.fc_visible = True
+            self.fc_btn = tk.Button(top, text="СУО", command=self.toggle_fc,
+                                    bg="#2A2A2A", fg="#DDDDDD", activebackground="#3A3A3A",
+                                    activeforeground="#FFFFFF", relief="flat", padx=10)
+            self.fc_btn.pack(side="right", pady=6)
+            self.root.bind("<Control-f>", self.toggle_fc)
         self.canvas = tk.Canvas(body, width=map_size, height=map_size,
                                 bg=self.BG, highlightthickness=0, cursor="crosshair")
         self.canvas.pack(side="left", fill="both", expand=True, padx=6, pady=6)
@@ -585,7 +602,7 @@ class RangefinderApp:
         st = self.settings
         bg, fg, dim = "#181818", "#DDDDDD", "#8A8A8A"
         panel = tk.Frame(parent, bg=bg, padx=10, pady=8)
-        panel.pack(side="right", fill="y", padx=(0, 6), pady=6)
+        self.fc_panel = panel
 
         tk.Label(panel, text="СУО", font=("Segoe UI", 11, "bold"), fg=dim, bg=bg).pack(anchor="w")
         self.fc_main = tk.StringVar(value="Прицел: —")
@@ -673,7 +690,22 @@ class RangefinderApp:
         if self.last is not None and hasattr(self, "fc_main"):
             self._update_fc(self.last)
 
+    def toggle_fc(self, _event: Any = None) -> None:
+        if self.fc_panel is None:
+            return
+        if self.fc_visible:
+            self.fc_panel.pack_forget()
+        else:
+            self.fc_panel.pack(side="right", fill="y", padx=(0, 6), pady=6, before=self.canvas)
+        self.fc_visible = not self.fc_visible
+        self.settings.fc_enabled = self.fc_visible
+        self.settings.save()
+        if self.fc_visible and self.last is not None:
+            self._update_fc(self.last)
+
     def _update_fc(self, m: Measurement) -> None:
+        if not self.fc_visible:
+            return
         target = m.main
         if target is None:
             self.fc_main.set("Прицел: —")
@@ -888,13 +920,13 @@ class RangefinderApp:
 
 
 def run_gui(host: str, interval: float, alpha: float, map_size: int,
-            fullscreen: bool = False) -> int:
+            fullscreen: bool = False, fire_control: bool = True) -> int:
     try:
         import tkinter  # noqa: F401
     except ImportError:
         print("tkinter недоступен — запускаю консольный режим", file=sys.stderr)
         return run_console(host, interval, once=False)
-    RangefinderApp(host, interval, alpha, map_size, fullscreen).run()
+    RangefinderApp(host, interval, alpha, map_size, fullscreen, fire_control).run()
     return 0
 
 
@@ -914,18 +946,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="начальный размер карты в окне, пикселей (по умолчанию 600)")
     parser.add_argument("--fullscreen", action="store_true",
                         help="сразу открыть на весь экран (F11 — переключить)")
+    parser.add_argument("--no-fc", action="store_true",
+                        help="без СУО: только дальномер (в окне — Ctrl+F или кнопка «СУО»)")
     fc = parser.add_argument_group("СУО (консольный режим; в окне — панель справа)")
     fc.add_argument("--own-alt", type=float, help="своя высота, м")
     fc.add_argument("--target-alt", type=float, help="высота цели, м")
     fc.add_argument("--v0", type=float, help="начальная скорость снаряда, м/с")
     fc.add_argument("--mass", type=float, help="масса снаряда, кг")
     fc.add_argument("--caliber", type=float, help="калибр снаряда, мм")
-    fc.add_argument("--shell-type", choices=sorted(bal.SHELL_TYPES), help="тип снаряда")
+    fc.add_argument("--shell-type", choices=sorted(bal.SHELL_TYPES) if HAS_FC else None, help="тип снаряда")
     fc.add_argument("--high-angle", action="store_true", help="считать и навесную траекторию")
     args = parser.parse_args(argv)
 
     interval = max(0.1, args.interval)
     if args.console or args.once:
+        if args.no_fc or not HAS_FC:
+            return run_console(args.host, interval, args.once, None)
         st = FireControlSettings.load()
         for attr, val in (("own_alt", args.own_alt), ("target_alt", args.target_alt),
                           ("v0", args.v0), ("mass_kg", args.mass), ("caliber_mm", args.caliber)):
@@ -933,12 +969,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 setattr(st, attr, val)
         if args.shell_type:
             st.shell_type = args.shell_type
-            st.form_factor = bal.SHELL_TYPES[args.shell_type].form_factor
+            st.form_factor = bal.SHELL_TYPES[args.shell_type].form_factor  # type: ignore
         if args.high_angle:
             st.high_angle = True
         return run_console(args.host, interval, args.once, st)
     return run_gui(args.host, interval, min(1.0, max(0.2, args.alpha)),
-                   max(200, args.map_size), args.fullscreen)
+                   max(200, args.map_size), args.fullscreen, not args.no_fc)
 
 
 if __name__ == "__main__":

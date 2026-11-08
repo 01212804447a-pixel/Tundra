@@ -169,3 +169,30 @@ class AgainstFakeServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WithoutFireControl(unittest.TestCase):
+    """Дальномер должен работать, даже если рядом нет ballistics.py."""
+
+    def test_runs_without_ballistics(self):
+        import shutil
+        import subprocess
+        import tempfile
+
+        server = fake_wt_server.make_server(0)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                shutil.copy(os.path.join(ROOT, "wt_rangefinder.py"), d)
+                env = dict(os.environ, HOME=d)
+                out = subprocess.run(
+                    [sys.executable, "-I", os.path.join(d, "wt_rangefinder.py"),
+                     "--host", f"http://127.0.0.1:{port}", "--once"],
+                    capture_output=True, text=True, timeout=20, env=env, cwd=d)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("Метка:", out.stdout)
+            self.assertNotIn("СУО", out.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
