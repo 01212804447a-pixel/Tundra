@@ -95,6 +95,13 @@ class RealDump(unittest.TestCase):
         expected = wr.distance_m(self.m.player, wr.Point(0.357068, 0.483776), self.m.map_info)
         self.assertAlmostEqual(a.distance_m, expected)
 
+    def test_enemy_spawns(self):
+        # в дампе одна вражеская танковая база внутри карты; авиа-спавн вне карты не считается
+        self.assertEqual(len(self.m.enemy_spawns), 1)
+        sp = self.m.enemy_spawns[0]
+        self.assertAlmostEqual(sp.point.x, 0.103226)
+        self.assertTrue(any(line.startswith("Спавн врага") for line in wr.describe(self.m)))
+
     def test_sides_in_dump(self):
         sides = {o.icon + str(o.rgb): o.side for o in self.m.objects if o.type == "ground_model"}
         self.assertEqual(sides["IFV(103, 215, 86)"], "squad")
@@ -151,6 +158,7 @@ class AgainstFakeServer(unittest.TestCase):
             self.assertEqual(len(m.markers), 1)
             self.assertEqual(len(m.enemies), 1)
             self.assertEqual([z.name for z in m.zones], ["A", "B"])
+            self.assertEqual(len(m.enemy_spawns), 5)
         finally:
             server.shutdown()
             server.server_close()

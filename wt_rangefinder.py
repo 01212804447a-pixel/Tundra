@@ -109,6 +109,7 @@ class Measurement:
     markers: List[Target] = field(default_factory=list)
     zones: List[Target] = field(default_factory=list)
     enemies: List[Target] = field(default_factory=list)
+    enemy_spawns: List[Target] = field(default_factory=list)
 
     @property
     def main(self) -> Optional[Target]:
@@ -214,6 +215,10 @@ def parse_objects(data: Any) -> List[MapObject]:
     return result
 
 
+def is_spawn(obj: MapObject) -> bool:
+    return obj.type.startswith("respawn_base")
+
+
 def is_marker(obj: MapObject) -> bool:
     if obj.type in MARKER_TYPES or obj.icon in MARKER_ICONS:
         return True
@@ -284,9 +289,12 @@ def measure_from_data(map_info_json: Any, map_obj_json: Any,
             m.zones.append(make_target("zone", o.label or "?", player, o.point, info))
         elif o.type in UNIT_TYPES and o.side == "enemy" and o.point.on_map():
             m.enemies.append(make_target("enemy", o.icon or o.type, player, o.point, info))
+        elif is_spawn(o) and o.side == "enemy" and o.point.on_map():
+            m.enemy_spawns.append(make_target("spawn", o.type, player, o.point, info))
 
     m.markers.sort(key=lambda t: t.distance_m)
     m.enemies.sort(key=lambda t: t.distance_m)
+    m.enemy_spawns.sort(key=lambda t: t.distance_m)
     m.zones.sort(key=lambda t: t.name)
     return m
 
@@ -365,6 +373,8 @@ def describe(m: Measurement) -> List[str]:
         lines.append(f"Метка: {format_target(t)}")
     for t in m.enemies[:3]:
         lines.append(f"Враг ({ICON_NAMES.get(t.name, t.name)}): {format_target(t)}")
+    if m.enemy_spawns:
+        lines.append(f"Спавн врага: {format_target(m.enemy_spawns[0])}")
     if m.zones:
         lines.append("Точки: " + "  ".join(f"{z.name} {format_distance(z.distance_m)}" for z in m.zones))
     if not (m.click or m.markers or m.enemies):
@@ -403,14 +413,17 @@ SIDE_COLORS = {
 }
 
 
-def load_map_image(tk: Any, host: str, size: int) -> Any:
-    """Пытается загрузить картинку карты (map.img). Нужен Pillow для JPEG."""
+def fetch_map_image(host: str) -> Optional[bytes]:
+    """Картинка карты (map.img) из игры, или None."""
     try:
         raw = fetch_raw(host, "map.img", timeout=2.0)
     except ApiUnavailable:
         return None
-    if not raw:
-        return None
+    return raw or None
+
+
+def make_photo(tk: Any, raw: bytes, size: int) -> Any:
+    """Масштабирует картинку карты под размер. Для JPEG нужен Pillow."""
     try:
         from io import BytesIO
 
@@ -420,25 +433,36 @@ def load_map_image(tk: Any, host: str, size: int) -> Any:
         return ImageTk.PhotoImage(img)
     except Exception:  # Pillow не установлен или формат не поддерживается
         pass
-    try:  # Tk сам умеет PNG/GIF
+    try:  # Tk сам умеет PNG/GIF, но масштабирует только в целое число раз
         img = tk.PhotoImage(data=base64.b64encode(raw).decode("ascii"))
-        factor = max(1, round(img.width() / size))
-        return img.subsample(factor) if factor > 1 else img
+        if img.width() > size:
+            return img.subsample(max(1, round(img.width() / size)))
+        if img.width() < size:
+            return img.zoom(max(1, size // img.width()))
+        return img
     except Exception:
         return None
 
 
 class RangefinderApp:
-    def __init__(self, host: str, interval: float, alpha: float, map_size: int) -> None:
+    BG = "#111111"
+
+    def __init__(self, host: str, interval: float, alpha: float, map_size: int,
+                 fullscreen: bool = False) -> None:
         import tkinter as tk
 
         self.tk = tk
         self.host = host
         self.interval_ms = int(interval * 1000)
-        self.size = map_size
+        self.size = map_size        # текущий размер квадрата карты, px
+        self.ox = self.oy = 0       # отступ карты внутри холста (центрирование)
         self.click: Optional[Point] = None
         self.map_key: Optional[Tuple[float, ...]] = None
-        self.bg_image: Any = None
+        self.map_raw: Optional[bytes] = None
+        self.bg_cache: Dict[int, Any] = {}
+        self.last: Optional[Measurement] = None
+        self.redraw_job: Optional[str] = None
+        self.fullscreen = False
 
         self.root = tk.Tk()
         self.root.title("WT Дальномер")
@@ -447,45 +471,110 @@ class RangefinderApp:
             self.root.attributes("-alpha", alpha)
         except tk.TclError:
             pass
-        self.root.configure(bg="#111111")
+        self.root.configure(bg=self.BG)
+        self.root.minsize(260, 300)
 
+        top = tk.Frame(self.root, bg=self.BG)
+        top.pack(fill="x")
         self.dist_var = tk.StringVar(value="—")
         self.info_var = tk.StringVar(value="Запуск…")
-        tk.Label(self.root, textvariable=self.dist_var, font=("Consolas", 30, "bold"),
-                 fg="#7CFC00", bg="#111111").pack(fill="x")
+        tk.Label(top, textvariable=self.dist_var, font=("Consolas", 30, "bold"),
+                 fg="#7CFC00", bg=self.BG, padx=8).pack(side="left")
+        self.full_btn = tk.Button(top, text="⛶ Весь экран", command=self.toggle_fullscreen,
+                                  bg="#2A2A2A", fg="#DDDDDD", activebackground="#3A3A3A",
+                                  activeforeground="#FFFFFF", relief="flat", padx=10)
+        self.full_btn.pack(side="right", padx=6, pady=6)
         tk.Label(self.root, textvariable=self.info_var, font=("Segoe UI", 10),
-                 fg="#DDDDDD", bg="#111111", justify="left", anchor="w",
-                 padx=8, pady=4).pack(fill="x")
+                 fg="#DDDDDD", bg=self.BG, justify="left", anchor="w",
+                 padx=8, pady=2).pack(fill="x")
+        tk.Label(self.root, text="ЛКМ — цель   ПКМ — сброс   F11 — весь экран   "
+                                 "Esc — выйти из полноэкранного   Ctrl+M — скрыть карту",
+                 font=("Segoe UI", 9), fg="#888888", bg=self.BG).pack(side="bottom", pady=(0, 4))
 
-        self.canvas = tk.Canvas(self.root, width=self.size, height=self.size,
-                                bg="#1E2A1E", highlightthickness=0, cursor="crosshair")
-        self.canvas.pack(padx=6, pady=6)
+        self.canvas = tk.Canvas(self.root, width=map_size, height=map_size,
+                                bg=self.BG, highlightthickness=0, cursor="crosshair")
+        self.canvas.pack(fill="both", expand=True, padx=6, pady=6)
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Button-3>", self.on_clear)
-        tk.Label(self.root, text="ЛКМ — указать цель,  ПКМ — сбросить,  Ctrl+M — скрыть карту",
-                 font=("Segoe UI", 9), fg="#888888", bg="#111111").pack(pady=(0, 6))
+        self.canvas.bind("<Configure>", self.on_resize)
         self.map_visible = True
         self.root.bind("<Control-m>", self.toggle_map)
+        self.root.bind("<F11>", self.toggle_fullscreen)
+        self.root.bind("<Escape>", lambda _e: self.set_fullscreen(False))
+        if fullscreen:
+            self.root.after(100, lambda: self.set_fullscreen(True))
 
     # --- события ---------------------------------------------------------- #
     def on_click(self, event: Any) -> None:
-        self.click = Point(event.x / self.size, event.y / self.size)
-        self.refresh(reschedule=False)
+        p = Point((event.x - self.ox) / self.size, (event.y - self.oy) / self.size)
+        if p.on_map():
+            self.click = p
+            self.refresh(reschedule=False)
 
     def on_clear(self, _event: Any = None) -> None:
         self.click = None
         self.refresh(reschedule=False)
 
+    def on_resize(self, event: Any) -> None:
+        side = max(100, min(event.width, event.height))
+        self.size = side
+        self.ox = (event.width - side) // 2
+        self.oy = (event.height - side) // 2
+        if self.redraw_job:
+            self.root.after_cancel(self.redraw_job)
+        self.redraw_job = self.root.after(60, self._redraw_last)
+
+    def _redraw_last(self) -> None:
+        self.redraw_job = None
+        if self.last is not None and self.last.map_info is not None:
+            self.draw(self.last)
+
     def toggle_map(self, _event: Any = None) -> None:
         if self.map_visible:
             self.canvas.pack_forget()
         else:
-            self.canvas.pack(padx=6, pady=6)
+            self.canvas.pack(fill="both", expand=True, padx=6, pady=6)
         self.map_visible = not self.map_visible
+
+    def set_fullscreen(self, on: bool) -> None:
+        if on == self.fullscreen:
+            return
+        if on:
+            self.saved_geometry = self.root.geometry()
+        self.fullscreen = on
+        try:
+            self.root.attributes("-fullscreen", on)
+        except self.tk.TclError:
+            pass
+        if not on and getattr(self, "saved_geometry", None):
+            self.root.geometry(self.saved_geometry)
+        self.full_btn.configure(text="✕ Свернуть" if on else "⛶ Весь экран")
+        if on:
+            self.root.after(250, self._ensure_fullscreen)
+
+    def _ensure_fullscreen(self) -> None:
+        """Если оконный менеджер не развернул окно — растягиваем вручную."""
+        if not self.fullscreen:
+            return
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        if self.root.winfo_width() < sw * 0.9 or self.root.winfo_height() < sh * 0.9:
+            self.root.geometry(f"{sw}x{sh}+0+0")
+
+    def toggle_fullscreen(self, _event: Any = None) -> None:
+        self.set_fullscreen(not self.fullscreen)
 
     # --- отрисовка -------------------------------------------------------- #
     def _xy(self, p: Point) -> Tuple[float, float]:
-        return p.x * self.size, p.y * self.size
+        return self.ox + p.x * self.size, self.oy + p.y * self.size
+
+    def _background(self) -> Any:
+        if self.map_raw is None:
+            return None
+        if self.size not in self.bg_cache:
+            if len(self.bg_cache) > 4:
+                self.bg_cache.clear()
+            self.bg_cache[self.size] = make_photo(self.tk, self.map_raw, self.size)
+        return self.bg_cache[self.size]
 
     def draw(self, m: Measurement) -> None:
         c = self.canvas
@@ -498,25 +587,45 @@ class RangefinderApp:
             self.map_key = key
             self.click = None
             m.click = None
-            self.bg_image = load_map_image(self.tk, self.host, self.size)
-        if self.bg_image is not None:
-            c.create_image(0, 0, image=self.bg_image, anchor="nw")
-        self._draw_grid(info)
+            self.map_raw = fetch_map_image(self.host)
+            self.bg_cache.clear()
 
+        k = max(1.0, self.size / 420)  # масштаб значков
+        c.create_rectangle(self.ox, self.oy, self.ox + self.size, self.oy + self.size,
+                           fill="#1E2A1E", outline="")
+        bg = self._background()
+        if bg is not None:
+            c.create_image(self.ox, self.oy, image=bg, anchor="nw")
+        self._draw_grid(info, k)
+
+        seen = set()
         for o in m.objects:
-            if not o.point.on_map() or o.type.startswith("respawn_base"):
+            if not o.point.on_map() or o.icon == PLAYER_ICON:
                 continue
             x, y = self._xy(o.point)
             color = SIDE_COLORS.get(o.side, "#BBBBBB")
-            if o.type == "capture_zone":
-                c.create_oval(x - 9, y - 9, x + 9, y + 9, outline=color, width=2)
-                c.create_text(x, y, text=o.label, fill=color, font=("Segoe UI", 9, "bold"))
+            if is_spawn(o):
+                dedup = (round(o.point.x, 4), round(o.point.y, 4), o.side)
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                r = 4 * k
+                if o.type == "respawn_base_tank":
+                    c.create_polygon(x, y - r, x + r, y + r * 0.8, x - r, y + r * 0.8,
+                                     outline=color, fill="", width=max(1, int(k)))
+                else:  # авиа-/прочие спавны, если они внутри карты
+                    c.create_polygon(x, y - r, x + r, y, x, y + r, x - r, y,
+                                     outline=color, fill="", width=max(1, int(k)))
+            elif o.type == "capture_zone":
+                r = 9 * k
+                c.create_oval(x - r, y - r, x + r, y + r, outline=color, width=2)
+                c.create_text(x, y, text=o.label, fill=color,
+                              font=("Segoe UI", int(9 * k), "bold"))
             elif is_marker(o):
-                c.create_text(x, y, text="✚", fill="#FFFFFF", font=("Segoe UI", 12, "bold"))
-            elif o.icon == PLAYER_ICON:
-                continue
+                c.create_text(x, y, text="✚", fill="#FFFFFF", font=("Segoe UI", int(12 * k), "bold"))
             else:
-                c.create_rectangle(x - 3, y - 3, x + 3, y + 3, fill=color, outline="")
+                r = 3 * k
+                c.create_rectangle(x - r, y - r, x + r, y + r, fill=color, outline="black")
 
         if m.player:
             px, py = self._xy(m.player)
@@ -524,42 +633,44 @@ class RangefinderApp:
             if target:
                 tx, ty = self._xy(target.point)
                 c.create_line(px, py, tx, ty, fill="#7CFC00", dash=(4, 3), width=2)
-                c.create_text((px + tx) / 2, (py + ty) / 2 - 10,
+                c.create_text((px + tx) / 2, (py + ty) / 2 - 10 * k,
                               text=format_distance(target.distance_m),
-                              fill="#7CFC00", font=("Consolas", 11, "bold"))
-            c.create_oval(px - 5, py - 5, px + 5, py + 5, fill=SIDE_COLORS["player"], outline="black")
+                              fill="#7CFC00", font=("Consolas", int(11 * k), "bold"))
+            r = 5 * k
+            c.create_oval(px - r, py - r, px + r, py + r, fill=SIDE_COLORS["player"], outline="black")
         if m.click:
             x, y = self._xy(m.click.point)
-            c.create_line(x - 8, y, x + 8, y, fill="#FF00FF", width=2)
-            c.create_line(x, y - 8, x, y + 8, fill="#FF00FF", width=2)
+            r = 8 * k
+            c.create_line(x - r, y, x + r, y, fill="#FF00FF", width=2)
+            c.create_line(x, y - r, x, y + r, fill="#FF00FF", width=2)
 
-    def _draw_grid(self, info: MapInfo) -> None:
+    def _draw_grid(self, info: MapInfo, k: float) -> None:
         if not (info.grid_step_x and info.grid_step_y):
             return
-        c = self.canvas
+        c, s, ox, oy = self.canvas, self.size, self.ox, self.oy
+        font = ("Segoe UI", max(7, int(7 * k)))
         gx0 = info.grid_zero_x if info.grid_zero_x is not None else info.min_x
         gy0 = info.grid_zero_y if info.grid_zero_y is not None else info.max_y
         for i in range(0, 60):
-            wx = gx0 + i * info.grid_step_x
-            nx = (wx - info.min_x) / info.size_x
+            nx = (gx0 + i * info.grid_step_x - info.min_x) / info.size_x
             if nx > 1:
                 break
             if nx >= 0:
-                c.create_line(nx * self.size, 0, nx * self.size, self.size, fill="#3A4A3A")
-                c.create_text(nx * self.size + 3, 2, text=str(i + 1), anchor="nw",
-                              fill="#8A9A8A", font=("Segoe UI", 7))
+                c.create_line(ox + nx * s, oy, ox + nx * s, oy + s, fill="#3A4A3A")
+                c.create_text(ox + nx * s + 3, oy + 2, text=str(i + 1), anchor="nw",
+                              fill="#8A9A8A", font=font)
         for j in range(0, 26):
-            wy = gy0 - j * info.grid_step_y
-            ny = (info.max_y - wy) / info.size_y
+            ny = (info.max_y - (gy0 - j * info.grid_step_y)) / info.size_y
             if ny > 1:
                 break
             if ny >= 0:
-                c.create_line(0, ny * self.size, self.size, ny * self.size, fill="#3A4A3A")
-                c.create_text(2, ny * self.size + 12, text=chr(ord("A") + j), anchor="nw",
-                              fill="#8A9A8A", font=("Segoe UI", 7))
+                c.create_line(ox, oy + ny * s, ox + s, oy + ny * s, fill="#3A4A3A")
+                c.create_text(ox + 2, oy + ny * s + 12 * k, text=chr(ord("A") + j), anchor="nw",
+                              fill="#8A9A8A", font=font)
 
     def refresh(self, reschedule: bool = True) -> None:
         m = measure(self.host, timeout=min(1.0, self.interval_ms / 1000), click=self.click)
+        self.last = m
         if m.map_info is not None:
             self.draw(m)
         target = m.main
@@ -578,13 +689,14 @@ class RangefinderApp:
         self.root.mainloop()
 
 
-def run_gui(host: str, interval: float, alpha: float, map_size: int) -> int:
+def run_gui(host: str, interval: float, alpha: float, map_size: int,
+            fullscreen: bool = False) -> int:
     try:
         import tkinter  # noqa: F401
     except ImportError:
         print("tkinter недоступен — запускаю консольный режим", file=sys.stderr)
         return run_console(host, interval, once=False)
-    RangefinderApp(host, interval, alpha, map_size).run()
+    RangefinderApp(host, interval, alpha, map_size, fullscreen).run()
     return 0
 
 
@@ -600,15 +712,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--once", action="store_true", help="один замер и выход (консоль)")
     parser.add_argument("--alpha", type=float, default=0.9,
                         help="прозрачность окна 0.2–1.0 (по умолчанию 0.9)")
-    parser.add_argument("--map-size", type=int, default=420,
-                        help="размер карты в окне, пикселей (по умолчанию 420)")
+    parser.add_argument("--map-size", type=int, default=600,
+                        help="начальный размер карты в окне, пикселей (по умолчанию 600)")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="сразу открыть на весь экран (F11 — переключить)")
     args = parser.parse_args(argv)
 
     interval = max(0.1, args.interval)
     if args.console or args.once:
         return run_console(args.host, interval, args.once)
     return run_gui(args.host, interval, min(1.0, max(0.2, args.alpha)),
-                   max(200, args.map_size))
+                   max(200, args.map_size), args.fullscreen)
 
 
 if __name__ == "__main__":

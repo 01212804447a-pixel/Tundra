@@ -46,6 +46,12 @@ def map_obj() -> list:
          "icon": "HeavyTank", "icon_bg": "none", "x": 0.55, "y": 0.35},
         {"type": "point_of_interest", "color": "#FFFFFF", "blink": 0, "icon": "none",
          "icon_bg": "none", "x": 0.6, "y": 0.4},
+        *[{"type": "respawn_base_tank", "color": "#fa0C00", "color[]": [250, 12, 0], "blink": 0,
+           "icon": "respawn_base_tank", "icon_bg": "none", "x": 0.62 + dx, "y": 0.08 + dy}
+          for dx, dy in [(0, 0), (0.02, 0), (0.04, 0), (0.01, 0.02), (0.03, 0.02)]],
+        *[{"type": "respawn_base_tank", "color": "#174DFF", "color[]": [23, 77, 255], "blink": 0,
+           "icon": "respawn_base_tank", "icon_bg": "none", "x": 0.15 + dx, "y": 0.9 + dy}
+          for dx, dy in [(0, 0), (0.02, 0), (0.04, 0), (0.01, 0.02), (0.03, 0.02)]],
         {"type": "capture_zone", "color": "#fa0C00", "blink": 0, "icon": "capture_zone",
          "icon_bg": "none", "x": 0.5, "y": 0.5, "zone_label": "A"},
         {"type": "capture_zone", "color": "#174DFF", "blink": 0, "icon": "capture_zone",
